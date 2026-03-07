@@ -1,3 +1,4 @@
+@use "sass:math";
 // SVG Utilities
 // =============
 
@@ -123,7 +124,7 @@
 
   @for $i from 1 through length($colors) {
     $color: _susy-svg-color(nth($colors, $i));
-    $offset: percentage(($i - 1) / (length($colors) - 1));
+    $offset: percentage(math.div($i - 1, length($colors) - 1));
     $stop: '%3Cstop offset="#{$offset}" style="stop-color:#{$color};" /%3E';
 
     $gradient: $gradient + $stop;
