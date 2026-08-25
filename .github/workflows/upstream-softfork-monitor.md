@@ -53,6 +53,8 @@ steps:
         if ! git worktree add --detach "${worktree_dir}" origin/bex-master >"${rebase_log}" 2>&1; then
           rebase_status="conflict"
         else
+          git -C "${worktree_dir}" config user.name "github-actions[bot]"
+          git -C "${worktree_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git -C "${worktree_dir}" rebase --onto upstream/master "${old_base_sha}" >>"${rebase_log}" 2>&1; then
             rebase_status="conflict"
             git -C "${worktree_dir}" diff --name-only --diff-filter=U > "${conflict_files}"
