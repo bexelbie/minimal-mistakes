@@ -12,7 +12,7 @@ jobs:
     if: github.repository == 'mmistakes/minimal-mistakes'
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -21,7 +21,7 @@ jobs:
         ruby-version: '3.2'
     - name: Setup cache for Bundler
       id: cache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           docs/Gemfile.lock
