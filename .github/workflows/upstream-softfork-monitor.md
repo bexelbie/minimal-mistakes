@@ -140,7 +140,7 @@ post-steps:
         exit 0
       fi
 
-      message="Upstream soft-fork monitor: upstream changed, rebase clean, retained private patch; run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+      message="${GITHUB_REPOSITORY}: upstream changed, rebase clean, retained private patch; run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
       payload="$(jq -n \
         --arg message "${message}" \
         --arg repository "${GITHUB_REPOSITORY}" \
