@@ -99,24 +99,23 @@ post-steps:
       set -euo pipefail
       result_file="${GITHUB_WORKSPACE}/.gh-aw/upstream-softfork-monitor-result.json"
 
-      if [ "${JOB_STATUS}" = "success" ] && [ "${UPSTREAM_COMMIT_COUNT:-}" = "0" ]; then
-        echo "No upstream commits — skipping automated report"
-        exit 0
-      fi
-
       : "${NOTIFICATION_URL:?NOTIFICATION_URL must be configured}"
       : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
       : "${GITHUB_RUN_ID:?GITHUB_RUN_ID must be set}"
       : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT must be set}"
       : "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL must be set}"
 
+      heartbeat=false
       outcome="failure"
       verdict="unknown"
       uncertain="unknown"
       resolution=""
       issue_expected=false
       reason=""
-      if [ -z "${FORK_HEAD_SHA:-}" ] || [ -z "${OLD_BASE_SHA:-}" ] || [ -z "${UPSTREAM_HEAD_SHA:-}" ] || [ -z "${UPSTREAM_COMMIT_COUNT:-}" ] || [ -z "${REBASE_STATUS:-}" ]; then
+      if [ "${JOB_STATUS}" = "success" ] && [ "${UPSTREAM_COMMIT_COUNT:-}" = "0" ]; then
+        heartbeat=true
+        outcome="success"
+      elif [ -z "${FORK_HEAD_SHA:-}" ] || [ -z "${OLD_BASE_SHA:-}" ] || [ -z "${UPSTREAM_HEAD_SHA:-}" ] || [ -z "${UPSTREAM_COMMIT_COUNT:-}" ] || [ -z "${REBASE_STATUS:-}" ]; then
         reason="preflight outputs are missing"
       elif ! [[ "${UPSTREAM_COMMIT_COUNT}" =~ ^[0-9]+$ ]]; then
         reason="upstream commit count is invalid"
@@ -140,7 +139,7 @@ post-steps:
         fi
       fi
 
-      if [ -z "${reason}" ]; then
+      if [ "${heartbeat}" != "true" ] && [ -z "${reason}" ]; then
         if ! git fetch --prune --no-tags origin '+refs/heads/*:refs/remotes/origin/*' ||
           ! git fetch --prune --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*'; then
           outcome="failure"
@@ -156,7 +155,7 @@ post-steps:
           fi
         fi
       fi
-      if [ "${JOB_STATUS}" != "success" ] && [ -z "${reason}" ]; then
+      if [ "${heartbeat}" != "true" ] && [ "${JOB_STATUS}" != "success" ] && [ -z "${reason}" ]; then
         outcome="failure"
         reason="workflow failed before report"
       fi
