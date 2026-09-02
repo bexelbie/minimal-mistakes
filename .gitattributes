@@ -8,3 +8,5 @@ CHANGELOG.md                    text merge=union
 docs/_docs/18-history.md        text merge=union
 
 *.md                            text
+
+.github/workflows/*.lock.yml linguist-generated=true

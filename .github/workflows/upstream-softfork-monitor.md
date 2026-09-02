@@ -85,7 +85,7 @@ steps:
       echo "rebase_status=${rebase_status}" >> "${GITHUB_OUTPUT}"
 
 post-steps:
-  - name: Notify upstream rebase webhook
+  - name: Submit automated report
     if: always()
     env:
       FORK_HEAD_SHA: ${{ steps.repo_preflight.outputs.fork_head_sha }}
@@ -93,63 +93,121 @@ post-steps:
       UPSTREAM_HEAD_SHA: ${{ steps.repo_preflight.outputs.upstream_head_sha }}
       UPSTREAM_COMMIT_COUNT: ${{ steps.repo_preflight.outputs.upstream_commit_count }}
       REBASE_STATUS: ${{ steps.repo_preflight.outputs.rebase_status }}
-      REBASE_WEBHOOK_URL: ${{ secrets.REBASE_WEBHOOK_URL }}
+      JOB_STATUS: ${{ job.status }}
+      NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
     run: |
       set -euo pipefail
       result_file="${GITHUB_WORKSPACE}/.gh-aw/upstream-softfork-monitor-result.json"
 
-      if [ -z "${REBASE_WEBHOOK_URL:-}" ]; then
-        echo "REBASE_WEBHOOK_URL secret is not configured — skipping webhook notification"
-        exit 0
-      fi
-      if [ ! -f "${result_file}" ]; then
-        echo "No machine-readable result file found — skipping webhook"
-        exit 0
-      fi
-      if [ -z "${FORK_HEAD_SHA:-}" ] || [ -z "${OLD_BASE_SHA:-}" ] || [ -z "${UPSTREAM_HEAD_SHA:-}" ] || [ -z "${UPSTREAM_COMMIT_COUNT:-}" ]; then
-        echo "Preflight SHA outputs are missing — skipping webhook"
-        exit 0
-      fi
-      if [ "${UPSTREAM_COMMIT_COUNT}" -le 0 ]; then
-        echo "No upstream commits — skipping webhook"
-        exit 0
-      fi
-      if [ "${REBASE_STATUS}" != "clean" ]; then
-        echo "Rebase is not clean — skipping webhook"
+      if [ "${JOB_STATUS}" = "success" ] && [ "${UPSTREAM_COMMIT_COUNT:-}" = "0" ]; then
+        echo "No upstream commits — skipping automated report"
         exit 0
       fi
 
-      if ! jq -e '
+      : "${NOTIFICATION_URL:?NOTIFICATION_URL must be configured}"
+      : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
+      : "${GITHUB_RUN_ID:?GITHUB_RUN_ID must be set}"
+      : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT must be set}"
+      : "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL must be set}"
+
+      outcome="failure"
+      verdict="unknown"
+      uncertain="unknown"
+      resolution=""
+      issue_expected=false
+      reason=""
+      if [ -z "${FORK_HEAD_SHA:-}" ] || [ -z "${OLD_BASE_SHA:-}" ] || [ -z "${UPSTREAM_HEAD_SHA:-}" ] || [ -z "${UPSTREAM_COMMIT_COUNT:-}" ] || [ -z "${REBASE_STATUS:-}" ]; then
+        reason="preflight outputs are missing"
+      elif ! [[ "${UPSTREAM_COMMIT_COUNT}" =~ ^[0-9]+$ ]]; then
+        reason="upstream commit count is invalid"
+      elif [ ! -f "${result_file}" ]; then
+        reason="machine-readable agent result is missing"
+      elif ! jq -e '
         type == "object" and
-        .verdict == "retained" and
-        (.uncertain | type) == "boolean" and
-        .uncertain == false
+        (.verdict | IN("retained", "replaced", "uncertain")) and
+        (.uncertain | type) == "boolean"
       ' "${result_file}" >/dev/null; then
-        echo "Semantic verdict is not clean retained — skipping webhook"
-        exit 0
+        reason="machine-readable agent result is invalid"
+      else
+        verdict="$(jq -r '.verdict' "${result_file}")"
+        uncertain="$(jq -r '.uncertain' "${result_file}")"
+        resolution="$(jq -r '.resolution // ""' "${result_file}")"
+        outcome="attention_required"
+        issue_expected=true
+        if [ "${REBASE_STATUS}" = "clean" ] && [ "${verdict}" = "retained" ] && [ "${uncertain}" = "false" ]; then
+          outcome="success"
+          issue_expected=false
+        fi
       fi
 
-      git fetch --prune --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
-      git fetch --prune --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*'
-      actual_fork_head="$(git rev-parse origin/bex-master)"
-      actual_old_base="$(git merge-base origin/bex-master upstream/master)"
-      actual_upstream_head="$(git rev-parse upstream/master)"
-      actual_upstream_commit_count="$(git rev-list --count "${actual_old_base}..upstream/master")"
-      if [ "${actual_fork_head}" != "${FORK_HEAD_SHA}" ] || [ "${actual_old_base}" != "${OLD_BASE_SHA}" ] || [ "${actual_upstream_head}" != "${UPSTREAM_HEAD_SHA}" ] || [ "${actual_upstream_commit_count}" != "${UPSTREAM_COMMIT_COUNT}" ]; then
-        echo "Git refs changed since preflight — skipping webhook"
-        exit 0
+      if [ -z "${reason}" ]; then
+        if ! git fetch --prune --no-tags origin '+refs/heads/*:refs/remotes/origin/*' ||
+          ! git fetch --prune --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*'; then
+          outcome="failure"
+          reason="git ref revalidation failed"
+        else
+          actual_fork_head="$(git rev-parse origin/bex-master)"
+          actual_old_base="$(git merge-base origin/bex-master upstream/master)"
+          actual_upstream_head="$(git rev-parse upstream/master)"
+          actual_upstream_commit_count="$(git rev-list --count "${actual_old_base}..upstream/master")"
+          if [ "${actual_fork_head}" != "${FORK_HEAD_SHA}" ] || [ "${actual_old_base}" != "${OLD_BASE_SHA}" ] || [ "${actual_upstream_head}" != "${UPSTREAM_HEAD_SHA}" ] || [ "${actual_upstream_commit_count}" != "${UPSTREAM_COMMIT_COUNT}" ]; then
+            outcome="failure"
+            reason="git refs changed since preflight"
+          fi
+        fi
+      fi
+      if [ "${JOB_STATUS}" != "success" ] && [ -z "${reason}" ]; then
+        outcome="failure"
+        reason="workflow failed before report"
       fi
 
-      message="${GITHUB_REPOSITORY}: upstream changed, rebase clean, retained private patch; run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+      event_id="github-actions:${GITHUB_REPOSITORY}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:minimal-mistakes.upstream-softfork.completed"
+      occurred_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
       payload="$(jq -n \
-        --arg message "${message}" \
+        --arg workflow "upstream-softfork-monitor" \
+        --arg run_url "${run_url}" \
+        --arg outcome "${outcome}" \
+        --arg reason "${reason}" \
+        --arg verdict "${verdict}" \
+        --arg uncertain "${uncertain}" \
+        --arg rebase_status "${REBASE_STATUS:-unknown}" \
+        --arg fork_head_sha "${FORK_HEAD_SHA:-unknown}" \
+        --arg old_base_sha "${OLD_BASE_SHA:-unknown}" \
+        --arg upstream_head_sha "${UPSTREAM_HEAD_SHA:-unknown}" \
+        --arg upstream_commit_count "${UPSTREAM_COMMIT_COUNT:-unknown}" \
+        --arg resolution "${resolution}" \
+        --argjson issue_expected "${issue_expected}" \
+        '{workflow:$workflow,run_url:$run_url,outcome:$outcome,reason:$reason,
+          verdict:$verdict,uncertain:$uncertain,rebase_status:$rebase_status,
+          fork_head_sha:$fork_head_sha,old_base_sha:$old_base_sha,
+          upstream_head_sha:$upstream_head_sha,upstream_commit_count:$upstream_commit_count,
+          resolution:$resolution,issue_expected:$issue_expected}')"
+      jq -e 'type == "object"' >/dev/null <<<"${payload}"
+      report="$(jq -n \
+        --arg event_id "${event_id}" \
+        --arg occurred_at "${occurred_at}" \
+        --arg event "minimal-mistakes.upstream-softfork.completed" \
+        --arg outcome "${outcome}" \
         --arg repository "${GITHUB_REPOSITORY}" \
-        --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-        --arg old_base_sha "${OLD_BASE_SHA}" \
-        --arg upstream_head_sha "${UPSTREAM_HEAD_SHA}" \
-        --arg upstream_commit_count "${UPSTREAM_COMMIT_COUNT}" \
-        '{message:$message, repository:$repository, run_url:$run_url, old_base_sha:$old_base_sha, upstream_head_sha:$upstream_head_sha, upstream_commit_count:($upstream_commit_count|tonumber)}')"
-      curl --fail --silent --show-error --max-time 10 -H "Content-Type: application/json" -d "${payload}" "${REBASE_WEBHOOK_URL}"
+        --argjson payload "${payload}" \
+        '{schema:1,event_id:$event_id,occurred_at:$occurred_at,
+          source:"github-actions",event:$event,outcome:$outcome,
+          payload:$payload,repository:$repository}')"
+
+      for attempt in 1 2 3; do
+        status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+          --max-time 10 -H 'Content-Type: application/json' \
+          --data "${report}" "${NOTIFICATION_URL}" 2>/dev/null)" || status=000
+        case "${status}" in
+          2??) exit 0 ;;
+        esac
+        sleep "${attempt}"
+      done
+
+      printf 'report submission failed after 3 attempts (last HTTP status %s)\n' \
+        "${status}" >&2
+      exit 1
 
 safe-outputs:
   create-issue:
@@ -201,13 +259,15 @@ Track upstream changes to `mmistakes/minimal-mistakes` while preserving the priv
 
 ## Outcome rules
 
-- No upstream commits: no webhook and no issue.
-- Rebase conflict, exact replacement, semantic replacement, or uncertainty: issue path only, no webhook.
-- clean + count > 0 + verdict == retained + uncertain == false: webhook allowed.
-- Never expose `REBASE_WEBHOOK_URL` in the agent context or logs.
+- A healthy run with no upstream commits submits no report and creates no issue.
+- Any upstream-change outcome submits an automated report, including clean retained, rebase conflict, exact replacement, semantic replacement, and uncertainty.
+- Rebase conflict, exact replacement, semantic replacement, and uncertainty also use the gh-aw issue path.
+- Reports intentionally omit issue numbers because this post-step runs before gh-aw safe outputs create or update issues.
+- Preflight, agent-result, or report-delivery failures are workflow failures and submit failure reports when required data is available.
+- Never expose `NOTIFICATION_URL` in the agent context or logs.
 - Never create or update an issue for the clean+retained case.
 - Use `safe-outputs` issue creation/update only for changed-upstream outcomes that are not clean+retained.
 
 ## Final summary
 
-Keep the final job summary small: base SHA, upstream head SHA, upstream commit count, rebase status, verdict, issue URL if created, and webhook result.
+Keep the final job summary small: base SHA, upstream head SHA, upstream commit count, rebase status, verdict, issue URL if created, and report result.
